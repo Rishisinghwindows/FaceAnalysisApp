@@ -6,6 +6,12 @@ struct FaceAnalysisResultView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
 
+    private enum ImageDisplayMode {
+        case analysis
+        case overlay
+        case remix
+    }
+
     let result: AnalysisResult
     private let remixService: CreativeRemixing
 
@@ -19,7 +25,11 @@ struct FaceAnalysisResultView: View {
     @State private var remixSourceImage: UIImage?
     @State private var pendingRemixImage: UIImage?
     @State private var inlineRemixIsLoading = false
-    @State private var showingOriginal = true
+    @State private var imageDisplayMode: ImageDisplayMode = .overlay
+    @State private var overlayCycleID: Int = 0
+    @State private var flipAngle: Double = 0
+    @State private var isFlipping: Bool = false
+    @State private var breathe: Bool = false
     @State private var showMakeupStudio = false
     @State private var makeupSourceImage: UIImage?
     private let remixSuggestions: [RemixSuggestion] = [
@@ -67,7 +77,7 @@ struct FaceAnalysisResultView: View {
                     AnimatedSection(delay: 0.95) { creativeRemixSection }
                 }
                 .padding(.horizontal, 20)
-                .padding(.top, 24)
+                .padding(.top, 8)
                 .padding(.bottom, 24)
             }
         }
@@ -136,37 +146,37 @@ struct FaceAnalysisResultView: View {
     }
 
     private var titleSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Personalized Makeup Map")
-                .font(.system(size: 32, weight: .bold))
-                .foregroundStyle(primaryTextColor)
+        VStack(alignment: .leading, spacing: 4) {
             Text("Captured \(formattedDate). Tap any card for at-home application tips.")
-                .font(.system(size: 15, weight: .medium))
-                .foregroundStyle(secondaryTextColor)
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(primaryTextColor)
         }
     }
 
     private var imageGrid: some View {
         ZStack(alignment: .topTrailing) {
-            Group {
-                let displayImage = showingOriginal ? result.primaryImage : (remixImage ?? result.primaryImage)
-                if let image = displayImage {
-                    Image(uiImage: image)
-                        .resizable()
-                        .scaledToFill()
-                        .overlay(
-                            Group {
-                                if showingOriginal {
-                                    FaceScanAnimation()
-                                }
-                            }
-                        )
-                } else {
-                    placeholder
-                }
-            }
+            PhotoDetailView(
+                image: currentDisplayImage,
+                result: result,
+                showAnalysisOverlay: imageDisplayMode == .overlay,
+                deferBubbles: imageDisplayMode == .overlay
+            )
+            .id(overlayCycleID)
+            .rotation3DEffect(
+                .degrees(-flipAngle),
+                axis: (x: 0, y: 1, z: 0),
+                perspective: 0.85
+            )
             .frame(maxWidth: .infinity)
-            .aspectRatio(1, contentMode: .fit)
+            .aspectRatio(imageAspectRatio, contentMode: .fit)
+            .frame(maxHeight: 420)
+            .rotation3DEffect(
+                .degrees(flipAngle),
+                axis: (x: 0, y: 1, z: 0),
+                perspective: 0.85
+            )
+            .scaleEffect(breathe ? 1.012 : 0.988)
+            .animation(.easeInOut(duration: 1.8).repeatForever(autoreverses: true), value: breathe)
             .background(
                 RoundedRectangle(cornerRadius: 24, style: .continuous)
                     .fill(cardColor.opacity(0.9))
@@ -177,12 +187,33 @@ struct FaceAnalysisResultView: View {
             )
             .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
             .modifier(SpectrumAuraEffect())
+            .rotation3DEffect(
+                .degrees(flipAngle),
+                axis: (x: 0, y: 1, z: 0),
+                perspective: 0.65
+            )
+            .overlay(alignment: .topLeading) {
+                if let badge = displayBadgeTitle {
+                    Text(badge)
+                        .font(.system(size: 12, weight: .semibold))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(
+                            Capsule(style: .continuous)
+                                .fill(Color.black.opacity(0.5))
+                                .overlay(
+                                    Capsule(style: .continuous)
+                                        .stroke(Color.white.opacity(0.2), lineWidth: 1)
+                                )
+                        )
+                        .foregroundStyle(.white)
+                        .padding(12)
+                        .transition(.opacity.combined(with: .move(edge: .leading)))
+                }
+            }
 
             Button(action: {
-                guard remixImage != nil else { return }
-                withAnimation(.easeInOut(duration: 0.25)) {
-                    showingOriginal.toggle()
-                }
+                performFlipAndToggle()
             }) {
                 Image(systemName: "arrow.triangle.2.circlepath.camera")
                     .font(.system(size: 18, weight: .bold))
@@ -196,18 +227,80 @@ struct FaceAnalysisResultView: View {
             }
             .buttonStyle(.plain)
             .padding(12)
-            .opacity(remixImage == nil ? 0.35 : 1)
-            .disabled(remixImage == nil)
+            .opacity(canToggleDisplay && !isFlipping ? 1 : 0.35)
+            .disabled(!canToggleDisplay || isFlipping)
         }
         .onTapGesture {
-            if showingOriginal, let image = result.primaryImage {
-                fullScreenContent = .photo(image)
-            } else if let remix = remixImage {
-                fullScreenContent = .remix(remix)
-            } else if let image = result.primaryImage {
-                fullScreenContent = .photo(image)
+            switch imageDisplayMode {
+            case .analysis:
+                if let image = result.primaryImage {
+                    fullScreenContent = .photo(image)
+                }
+            case .overlay:
+                fullScreenContent = .map
+            case .remix:
+                if let remix = remixImage {
+                    fullScreenContent = .remix(remix)
+                } else if let image = result.primaryImage {
+                    fullScreenContent = .photo(image)
+                }
             }
         }
+        .onAppear { breathe = true }
+    }
+
+    private var canToggleDisplay: Bool {
+        remixImage != nil || hasOverlay
+    }
+
+    private var hasOverlay: Bool {
+        !result.overlay.zones.isEmpty
+    }
+
+    private var currentDisplayImage: UIImage? {
+        switch imageDisplayMode {
+        case .analysis, .overlay:
+            if let image = result.primaryImage {
+                return image
+            }
+            return remixImage
+        case .remix:
+            return remixImage ?? result.primaryImage
+        }
+    }
+
+    private var displayBadgeTitle: String? {
+        switch imageDisplayMode {
+        case .analysis:
+            return "Original"
+        case .overlay:
+            return "Makeup map"
+        case .remix:
+            return remixImage != nil ? "Creative remix" : nil
+        }
+    }
+
+    private var imageAspectRatio: CGFloat {
+        let width = CGFloat(result.imageWidth)
+        let height = CGFloat(result.imageHeight)
+        guard width > 0, height > 0 else { return 1 }
+        return width / height
+    }
+
+    private func nextImageDisplayMode() -> ImageDisplayMode {
+        if remixImage != nil {
+            switch imageDisplayMode {
+            case .analysis:
+                return .remix
+            case .remix:
+                return hasOverlay ? .overlay : .analysis
+            case .overlay:
+                return .analysis
+            }
+        } else if hasOverlay {
+            return imageDisplayMode == .overlay ? .analysis : .overlay
+        }
+        return imageDisplayMode
     }
 
     private var featureSummary: some View {
@@ -279,6 +372,35 @@ struct FaceAnalysisResultView: View {
                     )
                     .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.25 : 0.08), radius: 20, x: 0, y: 12)
                 }
+            }
+        }
+    }
+
+    private func performFlipAndToggle() {
+        guard !isFlipping else { return }
+        isFlipping = true
+
+        let duration = 0.45
+        let targetMode = nextImageDisplayMode()
+        let restartOverlay = targetMode == .overlay
+
+        withAnimation(.easeInOut(duration: duration)) {
+            flipAngle = 180
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration / 2) {
+            if restartOverlay {
+                overlayCycleID += 1
+            }
+            imageDisplayMode = targetMode
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration) {
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                flipAngle = 0
+                isFlipping = false
             }
         }
     }
@@ -1000,6 +1122,7 @@ struct FaceAnalysisResultView: View {
                 await MainActor.run {
                     self.inlineRemixIsLoading = false
                     self.remixImage = generated
+                    self.imageDisplayMode = .remix
                     self.fullScreenContent = .remix(generated)
                 }
             } catch {
@@ -1013,7 +1136,7 @@ struct FaceAnalysisResultView: View {
 
     private func presentRemixResult(_ image: UIImage) {
         remixImage = image
-        showingOriginal = false
+        imageDisplayMode = .remix
         fullScreenContent = .remix(image)
     }
 
@@ -1021,7 +1144,7 @@ struct FaceAnalysisResultView: View {
         if let source = fallbackSource {
             let mock = placeholderRemix(from: source)
             remixImage = mock
-            showingOriginal = false
+            imageDisplayMode = .remix
             fullScreenContent = .remix(mock)
         } else {
             remixError = CreativeRemixError.server("Unable to generate the creative remix.").errorDescription
@@ -1509,31 +1632,49 @@ private struct PhotoDetailView: View {
                         .foregroundStyle(Color.primaryPink.opacity(0.8))
                 }
 
-                if showAnalysisOverlay {
-                    AnalysisOverlayView(result: result)
-                        .frame(width: drawSize.width, height: drawSize.height)
-                        .offset(x: offsetX, y: offsetY)
-                }
+                let showLayers = showAnalysisOverlay || deferBubbles
 
-                if deferBubbles {
-                    if overlayPhase == .scan {
-                        FaceScanAnimation {
-                            advancePhase(.vertical)
-                        }
-                        .frame(width: drawSize.width, height: drawSize.height)
-                        .offset(x: offsetX, y: offsetY)
+                if showLayers {
+                    if showAnalysisOverlay {
+                        AnalysisOverlayView(result: result)
+                            .frame(width: drawSize.width, height: drawSize.height)
+                            .offset(x: offsetX, y: offsetY)
                     }
 
-                    if overlayPhase == .vertical {
+                    if deferBubbles {
+                        if overlayPhase == .scan {
+                            FaceScanAnimation {
+                                advancePhase(.vertical)
+                            }
+                            .frame(width: drawSize.width, height: drawSize.height)
+                            .offset(x: offsetX, y: offsetY)
+                        }
+
+                        if overlayPhase == .vertical {
+                            FaceVerticalRatioOverlay(
+                                percentages: result.verticalRatioPercentages,
+                                normalizedFaceRect: normalizedFaceRect
+                            )
+                                .frame(width: drawSize.width, height: drawSize.height)
+                                .offset(x: offsetX, y: offsetY)
+                        }
+
+                        if overlayPhase == .horizontal {
+                            FaceHorizontalRatioOverlay(
+                                percentages: result.horizontalRatioPercentages,
+                                normalizedFaceRect: normalizedFaceRect
+                            )
+                                .frame(width: drawSize.width, height: drawSize.height)
+                                .offset(x: offsetX, y: offsetY)
+                        }
+                    } else {
                         FaceVerticalRatioOverlay(
                             percentages: result.verticalRatioPercentages,
                             normalizedFaceRect: normalizedFaceRect
                         )
                             .frame(width: drawSize.width, height: drawSize.height)
                             .offset(x: offsetX, y: offsetY)
-                    }
 
-                    if overlayPhase == .horizontal {
                         FaceHorizontalRatioOverlay(
                             percentages: result.horizontalRatioPercentages,
                             normalizedFaceRect: normalizedFaceRect
@@ -1541,34 +1682,20 @@ private struct PhotoDetailView: View {
                             .frame(width: drawSize.width, height: drawSize.height)
                             .offset(x: offsetX, y: offsetY)
                     }
-                } else {
-                    FaceVerticalRatioOverlay(
-                        percentages: result.verticalRatioPercentages,
-                        normalizedFaceRect: normalizedFaceRect
-                    )
-                        .frame(width: drawSize.width, height: drawSize.height)
-                        .offset(x: offsetX, y: offsetY)
 
-                    FaceHorizontalRatioOverlay(
-                        percentages: result.horizontalRatioPercentages,
-                        normalizedFaceRect: normalizedFaceRect
-                    )
-                        .frame(width: drawSize.width, height: drawSize.height)
-                        .offset(x: offsetX, y: offsetY)
-                }
+                    if !deferBubbles || overlayPhase == .details {
+                        FaceDetailDotsOverlay(
+                            result: result,
+                            imageFrame: CGRect(origin: CGPoint(x: offsetX, y: offsetY), size: drawSize),
+                            containerSize: containerSize
+                        )
 
-                if !deferBubbles || overlayPhase == .details {
-                    FaceDetailDotsOverlay(
-                        result: result,
-                        imageFrame: CGRect(origin: CGPoint(x: offsetX, y: offsetY), size: drawSize),
-                        containerSize: containerSize
-                    )
-
-                    MeasurementTagOverlay(
-                        result: result,
-                        imageFrame: CGRect(origin: CGPoint(x: offsetX, y: offsetY), size: drawSize),
-                        containerSize: containerSize
-                    )
+                        MeasurementTagOverlay(
+                            result: result,
+                            imageFrame: CGRect(origin: CGPoint(x: offsetX, y: offsetY), size: drawSize),
+                            containerSize: containerSize
+                        )
+                    }
                 }
             }
             .frame(width: containerSize.width, height: containerSize.height)
